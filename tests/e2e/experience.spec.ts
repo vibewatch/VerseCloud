@@ -50,18 +50,12 @@ test('opens the 3D poetry experience and navigates between poems', async ({ page
   await expect(page.locator('.geographic-map')).toHaveAttribute('data-poem-route-state', 'idle')
   const placeGroups = JSON.parse(
     await page.locator('.geographic-map').getAttribute('data-poem-place-groups') ?? '[]',
-  ) as Array<{
-    key: string
-    liftTier: number
-    markerHeight: number
-    hasNearbyPlace: boolean
-  }>
-  const crowdedCapitalMarkers = placeGroups.filter((group) =>
-    ['changan-fallen-city', 'weicheng', 'puzhou-guanquelou'].includes(group.key),
-  )
-  expect(crowdedCapitalMarkers).toHaveLength(3)
-  expect(crowdedCapitalMarkers.every((group) => group.hasNearbyPlace)).toBe(true)
-  expect(new Set(crowdedCapitalMarkers.map((group) => group.liftTier)).size).toBe(3)
+  ) as Array<{ key: string; count: number; markerHeight: number; poemIds: string[] }>
+  // Every place carries one fixed marker height; crowding is resolved by
+  // folding neighbours into numbered seals rather than by lifting slips.
+  expect(placeGroups.length).toBeGreaterThan(90)
+  expect(new Set(placeGroups.map((group) => group.markerHeight)).size).toBe(1)
+  await expect(page.locator('.geographic-map')).toHaveAttribute('data-poem-density-policy', 'clustered')
   await expect(page.locator('.map-legend, .interaction-hint, .release-note')).toHaveCount(0)
   expect(await page.locator('.geographic-map .maplibregl-marker').count()).toBeLessThanOrEqual(2)
   await expect(page.locator('canvas')).toHaveCSS('height', '960px')
@@ -91,19 +85,18 @@ test('opens the 3D poetry experience and navigates between poems', async ({ page
   await page.locator('.map-poem-sign').evaluate((sign) => {
     sign.setAttribute('data-continuity-token', 'stable-selected-poem-marker')
   })
-  const initialPoemScreenPositions = JSON.parse(
-    await map.getAttribute('data-poem-screen-positions') ?? '{}',
-  ) as Record<string, { x: number; y: number }>
-  const weichengPoint = initialPoemScreenPositions['wang-wei-weicheng']
-  const weichengMarker = placeGroups.find((group) => group.key === 'weicheng')
-  expect(weichengPoint).toBeTruthy()
-  expect(weichengMarker).toBeTruthy()
-  // The crowded capital slips are clickable at their raised WebGL heads,
-  // not only at the geographic base point.
-  await page.mouse.click(
-    (mapBounds?.x ?? 0) + weichengPoint.x,
-    (mapBounds?.y ?? 0) + weichengPoint.y - weichengMarker!.markerHeight + 12,
-  )
+  // Overview crowding is folded into count seals whose totals match the map.
+  await expect.poll(async () => JSON.parse(
+    await map.getAttribute('data-poem-clusters') ?? '[]',
+  ).length).toBeGreaterThan(0)
+  const clusters = JSON.parse(
+    await map.getAttribute('data-poem-clusters') ?? '[]',
+  ) as Array<{ x: number; y: number; count: number }>
+  expect(clusters.every((cluster) => cluster.count >= 2)).toBe(true)
+
+  await page.getByRole('button', { name: /诗库/ }).click()
+  await page.locator('[data-library-poem="wang-wei-weicheng"]').click()
+  await page.locator('.poem-library > header button').click()
   await expect(page.getByRole('heading', { name: '送元二使安西' })).toBeVisible()
   await expect(page.locator('.map-poem-sign')).toHaveAttribute(
     'data-continuity-token',
@@ -113,22 +106,37 @@ test('opens the 3D poetry experience and navigates between poems', async ({ page
   await expect(map).toHaveAttribute('data-poem-route-to', 'wang-wei-weicheng')
   await expect(map).toHaveAttribute('data-poem-route-state', 'settled', { timeout: 3_000 })
   await expect(map).not.toHaveClass(/map-moving/, { timeout: 3_000 })
-  await page.waitForTimeout(100)
+  // A place standing on its own at this zoom is clicked at its marker head.
+  await page.waitForTimeout(400)
+  const visiblePlaces = JSON.parse(
+    await map.getAttribute('data-poem-visible-places') ?? '[]',
+  ) as string[]
   const poemScreenPositions = JSON.parse(
     await map.getAttribute('data-poem-screen-positions') ?? '{}',
   ) as Record<string, { x: number; y: number }>
-  const jiandePoint = poemScreenPositions['meng-haoran-jiande']
-  expect(jiandePoint).toBeTruthy()
+  const loneMarker = placeGroups
+    .filter((group) => group.count === 1 && visiblePlaces.includes(group.key))
+    .map((group) => ({ id: group.poemIds[0], point: poemScreenPositions[group.poemIds[0]] }))
+    .find(({ id, point }) => id !== 'wang-wei-weicheng'
+      && point.x > 380 && point.x < (mapBounds?.width ?? 0) - 80
+      && point.y > 140 && point.y < (mapBounds?.height ?? 0) - 60)
+  expect(loneMarker).toBeTruthy()
   await page.mouse.click(
-    (mapBounds?.x ?? 0) + jiandePoint.x,
-    (mapBounds?.y ?? 0) + jiandePoint.y,
+    (mapBounds?.x ?? 0) + loneMarker!.point.x,
+    (mapBounds?.y ?? 0) + loneMarker!.point.y - placeGroups[0].markerHeight + 12,
   )
+  await expect(page.locator('.map-poem-sign')).toHaveAttribute('data-poem-id', loneMarker!.id)
+  await expect(map).not.toHaveClass(/map-moving/, { timeout: 3_000 })
+
+  await page.getByRole('button', { name: /诗库/ }).click()
+  await page.locator('[data-library-poem="meng-haoran-jiande"]').click()
+  await page.locator('.poem-library > header button').click()
   await expect(page.getByRole('heading', { name: '宿建德江' })).toBeVisible()
   await expect(page.getByText('移舟泊烟渚，', { exact: true })).toBeVisible()
   await expect(page.getByText('日暮客愁新。', { exact: true })).toBeVisible()
   await expect(page.locator('.map-poem-sign')).toHaveAttribute('data-sentence-count', '4')
   await expect(page.locator('.era-year')).toHaveText('730年')
-  await expect(page.locator('.era-panel p')).toHaveText('开元十八年 · 漫游吴越')
+  await expect(page.locator('.era-line')).toHaveText('开元十八年 · 漫游吴越')
   await expect(page.locator('.soundscape-status')).toHaveAttribute(
     'data-poem-soundscape',
     '烟渚近月',
@@ -252,7 +260,7 @@ test('opens the 3D poetry experience and navigates between poems', async ({ page
   await expect(page.getByText('千里江陵一日还。', { exact: true })).toBeVisible()
   await expect(page.locator('.map-poem-sign')).toHaveAttribute('data-sentence-count', '4')
   await expect(page.locator('.era-year')).toHaveText('759年春')
-  await expect(page.locator('.era-panel p')).toHaveText('乾元二年 · 遇赦东归')
+  await expect(page.locator('.era-line')).toHaveText('乾元二年 · 遇赦东归')
   await expect(page.locator('.soundscape-status')).toHaveAttribute(
     'data-poem-soundscape',
     '彩云轻舟',
@@ -276,6 +284,7 @@ test('opens the 3D poetry experience and navigates between poems', async ({ page
 })
 
 test('publishes and browses every literary period', async ({ page }) => {
+  test.setTimeout(180_000)
   await page.emulateMedia({ reducedMotion: 'reduce' })
   const runtimeErrors: string[] = []
   page.on('pageerror', (error) => runtimeErrors.push(error.message))
@@ -286,22 +295,22 @@ test('publishes and browses every literary period', async ({ page }) => {
   })
 
   const periods = [
-    { id: 'pre-qin', label: '先秦', firstTitle: '关雎', count: 6, system: '列国与王畿' },
-    { id: 'han', label: '汉', firstTitle: '大风歌', count: 10, system: '十三州刺史部' },
-    { id: 'wei-jin', label: '魏晋', firstTitle: '七步诗', count: 4, system: '州郡格局' },
-    { id: 'southern-northern', label: '南北朝', firstTitle: '敕勒歌', count: 4, system: '南北州镇格局' },
-    { id: 'sui', label: '隋', firstTitle: '人日思归', count: 3, system: '郡县制' },
-    { id: 'tang', label: '唐', firstTitle: '春望', count: 103, system: '十五道与州府' },
-    { id: 'five-dynasties', label: '五代', firstTitle: '虞美人', count: 3, system: '五代十国政权区划' },
-    { id: 'song', label: '宋', firstTitle: '水调歌头', count: 58, system: '北宋路制' },
-    { id: 'yuan', label: '元', firstTitle: '天净沙·秋思', count: 4, system: '行中书省' },
-    { id: 'ming', label: '明', firstTitle: '石灰吟', count: 5, system: '两京十三布政使司' },
-    { id: 'qing', label: '清', firstTitle: '己亥杂诗·其五', count: 10, system: '内地十八省' },
+    { id: 'pre-qin', label: '先秦', firstTitle: '关雎', count: 11, system: '列国与王畿' },
+    { id: 'han', label: '汉', firstTitle: '大风歌', count: 15, system: '十三州刺史部' },
+    { id: 'wei-jin', label: '魏晋', firstTitle: '七步诗', count: 8, system: '州郡格局' },
+    { id: 'southern-northern', label: '南北朝', firstTitle: '敕勒歌', count: 7, system: '南北州镇格局' },
+    { id: 'sui', label: '隋', firstTitle: '人日思归', count: 4, system: '郡县制' },
+    { id: 'tang', label: '唐', firstTitle: '春望', count: 138, system: '十五道与州府' },
+    { id: 'five-dynasties', label: '五代', firstTitle: '虞美人', count: 7, system: '五代十国政权区划' },
+    { id: 'song', label: '宋', firstTitle: '水调歌头·明月几时有', count: 87, system: '北宋路制' },
+    { id: 'yuan', label: '元', firstTitle: '天净沙·秋思', count: 8, system: '行中书省' },
+    { id: 'ming', label: '明', firstTitle: '石灰吟', count: 9, system: '两京十三布政使司' },
+    { id: 'qing', label: '清', firstTitle: '己亥杂诗·其五', count: 19, system: '内地十八省' },
   ]
 
   await page.goto('/')
   await expect(page.locator('.dynasty-nav button')).toHaveCount(periods.length)
-  await expect(page.getByText('十一段诗史 · 210处诗光')).toBeVisible()
+  await expect(page.getByText('十一段诗史 · 313处诗光')).toBeVisible()
   await page.getByRole('button', { name: /展开诗卷/ }).click()
 
   for (const period of periods) {
@@ -343,7 +352,7 @@ test('publishes and browses every literary period', async ({ page }) => {
   await expect(page.locator('.library-poems > button')).toHaveCount(2)
   await qingSearch.fill('袁枚')
   await expect(page.locator('.library-poems > button')).toHaveCount(2)
-  await expect(page.locator('.library-search b')).toHaveText('2/10')
+  await expect(page.locator('.library-search b')).toHaveText('2/19')
   await page.locator('[data-library-poem="yuan-mei-moss"]').click()
   await expect(page.locator('[data-library-poem="yuan-mei-moss"]')).toHaveAttribute(
     'aria-current',
@@ -356,18 +365,18 @@ test('publishes and browses every literary period', async ({ page }) => {
   await page.getByRole('button', { name: /打开诗库/ }).click()
   await page.getByRole('searchbox', { name: '搜索当前时期的诗词' }).fill('')
   await page.getByRole('button', { name: '小学', exact: true }).click()
-  await expect(page.locator('.library-search b')).toHaveText('6/10')
+  await expect(page.locator('.library-search b')).toHaveText('6/19')
   await expect(page.locator('.library-poems > button')).toHaveCount(6)
   await expect(page.locator('.library-poems > button small em')).toHaveText([
     '小学', '小学', '小学', '小学', '小学', '小学',
   ])
   await page.getByRole('button', { name: '初中', exact: true }).click()
-  await expect(page.locator('.library-search b')).toHaveText('3/10')
+  await expect(page.locator('.library-search b')).toHaveText('3/19')
   expect(runtimeErrors).toEqual([])
 })
 
 test('keeps every poem readable on a reduced-motion mobile viewport', async ({ page }) => {
-  test.setTimeout(240_000)
+  test.setTimeout(420_000)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.emulateMedia({ reducedMotion: 'reduce' })
   const runtimeErrors: string[] = []
@@ -427,7 +436,7 @@ test('keeps every poem readable on a reduced-motion mobile viewport', async ({ p
     }
   }
 
-  expect(visitedPoems).toBe(210)
+  expect(visitedPoems).toBe(313)
   expect(runtimeErrors).toEqual([])
 })
 
@@ -483,9 +492,9 @@ test('keeps the WebGL scene alive on a narrow mobile viewport', async ({ page })
   expect(mobileSignBounds!.y + mobileSignBounds!.height).toBeLessThanOrEqual(844)
 
   await page.locator('.dynasty-nav [data-dynasty="song"]').click()
-  await expect(page.getByRole('heading', { name: '水调歌头', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '水调歌头·明月几时有', exact: true })).toBeVisible()
   await expect(mobileMap).not.toHaveClass(/map-moving/, { timeout: 6_000 })
-  await expect(mobileSign).toHaveAttribute('data-sentence-count', '19')
+  await expect(mobileSign).toHaveAttribute('data-sentence-count', '24')
   const songScrollLayout = await mobileSign.evaluate((sign) => {
     const bounds = sign.getBoundingClientRect()
     return {

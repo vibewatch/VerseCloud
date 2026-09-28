@@ -107,7 +107,7 @@ async function inspectInteraction(
       '.icon-button', '.verse-compass',
       '.poem-library > header button', '.curriculum-filter button',
       '.library-search input', '.library-poems > button', '.library-evidence a',
-      '.poem-group-choice',
+      '.poem-group-choice', '.library-tabs button', '.poet-register > button', '.trail-toggle',
     ].join(',')))
     const ids = [...document.querySelectorAll<HTMLElement>('[id]')].map((element) => element.id)
     const duplicateIds = [...new Set(ids.filter((id, index) => ids.indexOf(id) !== index))]
@@ -221,25 +221,52 @@ async function waitForStableMap(page: Page) {
   await expect(map).not.toHaveClass(/map-moving/, { timeout: 8_000 })
 }
 
-async function clickPoemPlaceMarker(page: Page, poemId: string, placeKey: string) {
-  await waitForStableMap(page)
+type PlaceClick = 'marker' | 'picker'
+
+async function clickPoemPlaceMarker(page: Page, poemId: string, placeKey: string): Promise<PlaceClick> {
   const map = page.locator('.geographic-map')
-  const bounds = await map.boundingBox()
-  expect(bounds).not.toBeNull()
-  const positions = JSON.parse(
-    await map.getAttribute('data-poem-screen-positions') ?? '{}',
-  ) as Record<string, { x: number; y: number }>
-  const groups = JSON.parse(
-    await map.getAttribute('data-poem-place-groups') ?? '[]',
-  ) as Array<{ key: string; markerHeight: number }>
-  const point = positions[poemId]
-  const group = groups.find((candidate) => candidate.key === placeKey)
-  expect(point, poemId).toBeTruthy()
-  expect(group, placeKey).toBeTruthy()
-  await page.mouse.click(
-    bounds!.x + point.x,
-    bounds!.y + point.y - group!.markerHeight + 12,
-  )
+  const readJson = async <T>(name: string, fallback: string) =>
+    JSON.parse(await map.getAttribute(name) ?? fallback) as T
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    await waitForStableMap(page)
+    await page.waitForTimeout(250)
+    const bounds = await map.boundingBox()
+    expect(bounds).not.toBeNull()
+    const positions = await readJson<Record<string, { x: number; y: number }>>(
+      'data-poem-screen-positions',
+      '{}',
+    )
+    const groups = await readJson<Array<{ key: string; markerHeight: number }>>(
+      'data-poem-place-groups',
+      '[]',
+    )
+    const visiblePlaces = await readJson<string[]>('data-poem-visible-places', '[]')
+    const point = positions[poemId]
+    const group = groups.find((candidate) => candidate.key === placeKey)
+    expect(point, poemId).toBeTruthy()
+    expect(group, placeKey).toBeTruthy()
+    if (visiblePlaces.includes(placeKey)) {
+      await page.mouse.click(
+        bounds!.x + point.x,
+        bounds!.y + point.y - group!.markerHeight + 12,
+      )
+      return 'marker'
+    }
+    // The place is folded into a count seal at this zoom: open the nearest
+    // seal, which either zooms the camera in or lists the works it holds.
+    const clusters = await readJson<Array<{ x: number; y: number }>>('data-poem-clusters', '[]')
+    const nearest = clusters.sort((first, second) =>
+      Math.hypot(first.x - point.x, first.y - point.y)
+      - Math.hypot(second.x - point.x, second.y - point.y))[0]
+    expect(nearest, `seal holding ${placeKey}`).toBeTruthy()
+    const before = await map.getAttribute('data-poem-visible-places')
+    await page.mouse.click(bounds!.x + nearest.x, bounds!.y + nearest.y)
+    await page.waitForTimeout(400)
+    if (await page.locator('.poem-group-picker').isVisible()) return 'picker'
+    await expect.poll(() => map.getAttribute('data-poem-visible-places'), { timeout: 8_000 })
+      .not.toBe(before)
+  }
+  throw new Error(`Could not reach ${placeKey} through its count seals`)
 }
 
 async function openExternalLink(page: Page, link: Locator) {
@@ -266,7 +293,7 @@ async function openExternalLink(page: Page, link: Locator) {
 }
 
 test('records a desktop user journey across every primary interaction', async ({ page }, testInfo) => {
-  test.setTimeout(300_000)
+  test.setTimeout(420_000)
   const runtime = monitorRuntime(page)
   const { record, finish } = await createRecorder(page, testInfo, 'desktop', runtime, 24)
 
@@ -281,14 +308,16 @@ test('records a desktop user journey across every primary interaction', async ({
   await waitForStableMap(page)
   await expect(page.locator('.geographic-map')).toHaveAttribute(
     'data-poem-density-policy',
-    'progressive-disclosure',
+    'clustered',
   )
   await record('enter-experience', '展开诗卷', 'WebGL map, poem slip, controls, and audio state loaded')
 
-  await clickPoemPlaceMarker(page, 'li-bai-baidi', 'baidicheng')
+  if (await clickPoemPlaceMarker(page, 'li-bai-baidi', 'baidicheng') === 'picker') {
+    await page.getByRole('button', { name: '选择李白《早发白帝城》' }).click()
+  }
   await waitForStableMap(page)
   await expect(page.getByRole('heading', { name: '早发白帝城', exact: true })).toBeVisible()
-  await record('select-single-map-marker', '白帝城地图诗签', 'single-place marker selected Li Bai and rendered its route')
+  await record('select-single-map-marker', '白帝城地图诗签', 'count seals opened down to Baidi and selected Li Bai')
 
   await page.getByRole('button', { name: '静音' }).click()
   await record('mute-audio', '静音', 'soundscape muted and control changed to restore action')
@@ -320,6 +349,60 @@ test('records a desktop user journey across every primary interaction', async ({
     await waitForStableMap(page)
     await expect(page.getByRole('heading', { name: '山居秋暝', exact: true })).toBeVisible()
     await record('choose-same-place-poem', '王维《山居秋暝》', 'radial choice selected the requested poem')
+  }
+
+  // Following a person: the life trail folds the slip, frames every station
+  // and lets the reader walk the works stage by stage.
+  {
+    const map = page.locator('.geographic-map')
+    await page.locator('.trail-toggle').click()
+    await expect(map).toHaveAttribute('data-poet-trail', '王维')
+    await expect(map).toHaveAttribute('data-trail-folded', 'true')
+    await waitForStableMap(page)
+    await expect(page.locator('.trail-station').first()).toBeVisible()
+    await expect(page.locator('.trail-stages li.is-current')).toHaveCount(1)
+    await record('follow-poet-trail', '王维行迹', 'life stations, travelled line and works framed on the map')
+    await page.locator('.map-poem-sign.is-folded').click()
+    await expect(map).toHaveAttribute('data-trail-folded', 'false')
+    await waitForStableMap(page)
+    await record('unfold-slip-on-trail', '折叠诗签', 'the folded tab reopened the poem at its place')
+    const otherWork = page.locator('[data-trail-poem]:not([aria-current])').first()
+    const otherWorkId = await otherWork.getAttribute('data-trail-poem')
+    await otherWork.click()
+    await expect(page.locator('.map-poem-sign')).toHaveAttribute('data-poem-id', otherWorkId!)
+    await expect(map).toHaveAttribute('data-poet-trail', '王维')
+    await waitForStableMap(page)
+    await record('select-work-from-trail', `行迹作品 ${otherWorkId}`, 'a work on the trail was opened without leaving the trail')
+    await page.locator('.trail-toggle').click()
+    await expect(map).toHaveAttribute('data-poet-trail', '')
+    await expect(page.locator('.trail-station')).toHaveCount(0)
+    await record('close-poet-trail', '收起行迹', 'trail removed and the map returned to every place')
+
+    const registerTrigger = page.getByRole('button', { name: /打开诗库/ })
+    await registerTrigger.click()
+    await page.getByRole('tab', { name: /人物/ }).click()
+    await expect(page.locator('[data-library-poet]').first()).toBeVisible()
+    await record('open-poet-register', '诗库 · 人物', 'Tang poets listed with route sketches')
+    await page.getByRole('searchbox', { name: '搜索当前时期的诗人' }).fill('夔州')
+    await expect(page.locator('[data-library-poet="杜甫"]')).toBeVisible()
+    await record('search-poet-by-place', '人物搜索', 'poets found by a place on their life route')
+    await page.locator('[data-library-poet="杜甫"]').click()
+    await expect(page.locator('.poem-library')).toHaveCount(0)
+    await expect(map).toHaveAttribute('data-poet-trail', '杜甫')
+    await waitForStableMap(page)
+    await record('choose-poet-from-register', '杜甫', 'the whole life of Du Fu framed from the register')
+    await page.locator('[data-companion="李白"]').click()
+    await expect(map).toHaveAttribute('data-poet-trail', '李白')
+    await waitForStableMap(page)
+    await record('follow-companion', '交游 · 李白', 'a companion’s trail replaced the current one')
+    await page.locator('.trail-toggle').click()
+    await expect(map).toHaveAttribute('data-poet-trail', '')
+    await registerTrigger.click()
+    await page.getByRole('searchbox', { name: '搜索当前时期的诗人' }).fill('')
+    await page.getByRole('tab', { name: /诗词/ }).click()
+    await page.keyboard.press('Escape')
+    await expect(registerTrigger).toBeFocused()
+    await record('return-to-poem-register', '诗库 · 诗词', 'catalog returned to works for the period sweep')
   }
 
   const periods = [
@@ -442,7 +525,7 @@ test('records a mobile user journey, touch targets, and responsive states', asyn
   await waitForStableMap(page)
   await expect(page.locator('.geographic-map')).toHaveAttribute(
     'data-poem-density-policy',
-    'progressive-disclosure',
+    'clustered',
   )
   await record('enter-experience', '展开诗卷', 'mobile map and poem slip loaded')
 

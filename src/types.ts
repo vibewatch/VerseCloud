@@ -60,6 +60,39 @@ export interface Poem {
   curriculumLevels?: SchoolLevel[]
 }
 
+export interface GeoPlace {
+  placeName: string
+  longitude: number
+  latitude: number
+}
+
+/**
+ * One documented stop in a poet's life. Stations are ordered by `year` and
+ * describe where the person was, not where every poem was written; poems are
+ * attached to stations by proximity at runtime.
+ */
+export interface PoetStation extends GeoPlace {
+  year: number
+  yearLabel: string
+  event: string
+}
+
+export interface PoetProfile {
+  id: string
+  /** Must equal `Poem.author` for every work attributed to this person. */
+  name: string
+  dynasty: DynastyId
+  styleName?: string
+  epithet?: string
+  birthYear: number
+  deathYear: number
+  lifeLabel: string
+  hometown: GeoPlace
+  summary: string
+  stations: PoetStation[]
+  companions?: string[]
+}
+
 export interface MapSnapshot {
   id: string
   dynasty: DynastyId

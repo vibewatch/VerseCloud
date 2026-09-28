@@ -16,6 +16,8 @@ import {
   poems,
   relationLabels,
 } from './data/poems'
+import { poetByName } from './data/poets'
+import { poemsByAuthor } from './lib/poetGeography'
 import {
   computeSoundscapeMix,
   poemSoundscapeLabel,
@@ -23,10 +25,15 @@ import {
   SoundscapeEngine,
 } from './lib/soundscape'
 import { projectPoint } from './lib/geo'
+import { PoemFolio } from './components/PoemFolio'
+import { PoetRegister } from './components/PoetRegister'
 import { SceneBoundary } from './components/SceneBoundary'
-import type { DynastyId, Poem, ScenePoint, SoundscapeMix } from './types'
+import type { DynastyId, Poem, PoetProfile, ScenePoint, SoundscapeMix } from './types'
 
 type LibraryLevel = 'all' | 'primary' | 'middle'
+type LibraryTab = 'poems' | 'poets'
+
+const byYear = (first: Poem, second: Poem) => first.year - second.year
 
 const initialFocus = { x: 0, y: 0 }
 const VerseScene = lazy(() =>
@@ -41,7 +48,14 @@ export function App() {
   const [muted, setMuted] = useState(false)
   const [libraryOpen, setLibraryOpen] = useState(false)
   const [libraryQuery, setLibraryQuery] = useState('')
+  // Poems and people are searched by different words (a title versus a place
+  // on a life route), so each register keeps its own query.
+  const [poetQuery, setPoetQuery] = useState('')
   const [libraryLevel, setLibraryLevel] = useState<LibraryLevel>('all')
+  const [libraryTab, setLibraryTab] = useState<LibraryTab>('poems')
+  const [trailPoetName, setTrailPoetName] = useState<string | null>(null)
+  const [trailFolded, setTrailFolded] = useState(false)
+  const trailPoet = trailPoetName ? poetByName.get(trailPoetName) ?? null : null
   const [mix, setMix] = useState<SoundscapeMix>(() =>
     computeSoundscapeMix(initialFocus),
   )
@@ -57,13 +71,9 @@ export function App() {
   )
   const activeSnapshot = snapshots.find((snapshot) => snapshot.dynasty === activeDynasty)
     ?? snapshots[0]
-  const poemYearFloor = Math.min(...dynastyPoems.map((poem) => poem.year))
-  const poemYearCeiling = Math.max(...dynastyPoems.map((poem) => poem.year))
-  const eraProgress = poemYearCeiling === poemYearFloor
-    ? 50
-    : ((selectedPoem.year - poemYearFloor) / (poemYearCeiling - poemYearFloor)) * 100
+  const libraryQueryKey = libraryQuery.trim().toLocaleLowerCase('zh-CN')
   const visibleLibraryPoems = useMemo(() => {
-    const query = libraryQuery.trim().toLocaleLowerCase('zh-CN')
+    const query = libraryQueryKey
     return dynastyPoems.filter((poem) =>
       (libraryLevel === 'all' || poem.curriculumLevels?.includes(libraryLevel))
       && (!query || [
@@ -75,8 +85,30 @@ export function App() {
         poem.curriculumLevels?.includes('primary') ? '小学' : '',
         poem.curriculumLevels?.includes('middle') ? '初中' : '',
       ].some((value) => value.toLocaleLowerCase('zh-CN').includes(query))),
-    )
-  }, [dynastyPoems, libraryLevel, libraryQuery])
+    ).sort(byYear)
+  }, [dynastyPoems, libraryLevel, libraryQueryKey])
+  const dynastyAuthors = useMemo(
+    () => [...new Set(dynastyPoems.map((poem) => poem.author))],
+    [dynastyPoems],
+  )
+  const dynastyPoets = useMemo(
+    () => dynastyAuthors
+      .map((author) => poetByName.get(author))
+      .filter((poet): poet is PoetProfile => Boolean(poet))
+      .sort((first, second) => first.birthYear - second.birthYear),
+    [dynastyAuthors],
+  )
+  const poetQueryKey = poetQuery.trim().toLocaleLowerCase('zh-CN')
+  const visibleLibraryPoets = useMemo(
+    () => dynastyPoets.filter((poet) => !poetQueryKey || [
+      poet.name,
+      poet.styleName ?? '',
+      poet.epithet ?? '',
+      poet.hometown.placeName,
+      ...poet.stations.map((station) => station.placeName),
+    ].some((value) => value.toLocaleLowerCase('zh-CN').includes(poetQueryKey))),
+    [dynastyPoets, poetQueryKey],
+  )
 
   const startExperience = async () => {
     setEntered(true)
@@ -109,6 +141,9 @@ export function App() {
   const selectPoem = useCallback((poem: Poem) => {
     setSelectedPoem(poem)
     setActiveDynasty(poem.dynasty)
+    // Following a life keeps going while the reader stays with that person.
+    setTrailPoetName((current) => current === poem.author ? current : null)
+    setTrailFolded(false)
     const poemPoint = projectPoint(poem.longitude, poem.latitude)
     focusPoint.current = poemPoint
     const nextMix = engine.current?.update(poemPoint) ?? computeSoundscapeMix(poemPoint)
@@ -122,6 +157,7 @@ export function App() {
     const firstPoem = poems.find((poem) => poem.dynasty === dynasty)
     if (!firstPoem) return
     setLibraryQuery('')
+    setPoetQuery('')
     setLibraryLevel('all')
     selectPoem(firstPoem)
   }
@@ -130,6 +166,45 @@ export function App() {
     selectPoem(poem)
     if (window.matchMedia('(max-width: 680px)').matches) setLibraryOpen(false)
   }
+
+  const followPoet = (poet: PoetProfile, firstPoem?: Poem) => {
+    const works = poemsByAuthor(poet.name, poems)
+    const start = firstPoem
+      ?? works.find((poem) => poem.dynasty === activeDynasty)
+      ?? works[0]
+    if (!start) return
+    if (start.id !== selectedPoem.id) selectPoem(start)
+    setTrailPoetName(poet.name)
+    setTrailFolded(true)
+  }
+
+  const choosePoetFromLibrary = (poet: PoetProfile) => {
+    followPoet(poet)
+    setLibraryOpen(false)
+  }
+
+  const toggleTrail = () => {
+    const poet = poetByName.get(selectedPoem.author)
+    if (!poet) return
+    if (trailPoetName === poet.name) {
+      setTrailPoetName(null)
+      setTrailFolded(false)
+      return
+    }
+    followPoet(poet, selectedPoem)
+  }
+
+  const chooseCompanion = (poet: PoetProfile) => {
+    const works = poemsByAuthor(poet.name, poems)
+    if (trailPoet) {
+      followPoet(poet)
+      return
+    }
+    const first = works.find((poem) => poem.dynasty === activeDynasty) ?? works[0]
+    if (first) selectPoem(first)
+  }
+
+  const unfoldTrail = useCallback(() => setTrailFolded(false), [])
 
   const toggleMute = () => {
     const nextMuted = !muted
@@ -206,6 +281,9 @@ export function App() {
                 selectedPoem={selectedPoem}
                 onSelectPoem={selectPoem}
                 onFocusChange={handleFocusChange}
+                trailPoet={trailPoet}
+                trailFolded={trailFolded}
+                onUnfold={unfoldTrail}
               />
             </Suspense>
           </SceneBoundary>
@@ -282,22 +360,21 @@ export function App() {
         </div>
       </header>
 
-      <aside
-        className="era-panel"
-        aria-hidden={!entered || libraryOpen ? true : undefined}
-        aria-live="polite"
-        aria-label={`${selectedPoem.title}年代`}
-        style={{ '--era-progress': `${eraProgress.toFixed(1)}%` } as CSSProperties}
-      >
-        <span className="era-kicker">时空坐标</span>
-        <strong>{dynastyLabels[selectedPoem.dynasty]}</strong>
-        <div className="era-year">{selectedPoem.yearLabel}</div>
-        <p>{selectedPoem.eraLabel}</p>
-        <div className="timeline-track">
-          <span />
-        </div>
-        <small>考订纪年</small>
-      </aside>
+      {entered && (
+        <PoemFolio
+          poem={selectedPoem}
+          snapshot={activeSnapshot}
+          periodPoems={dynastyPoems}
+          corpus={poems}
+          trailOn={Boolean(trailPoet)}
+          trailFolded={trailFolded}
+          hidden={libraryOpen}
+          onSelectPoem={selectPoem}
+          onToggleTrail={toggleTrail}
+          onShowWholeTrail={() => setTrailFolded(true)}
+          onSelectCompanion={chooseCompanion}
+        />
+      )}
 
       {entered && (
         <footer
@@ -340,80 +417,128 @@ export function App() {
             <p className="period-note">
               {activeSnapshot.dateRange} · {activeSnapshot.note} · 本期{dynastyPoems.length}首
             </p>
-            <div className="curriculum-filter" role="group" aria-label="教材范围">
+            <div className="library-tabs" role="tablist" aria-label="诗库视图">
               {([
-                ['all', '全部'],
-                ['primary', '小学'],
-                ['middle', '初中'],
-              ] as const).map(([level, label]) => (
+                ['poems', '诗词', dynastyPoems.length],
+                ['poets', '人物', dynastyPoets.length],
+              ] as const).map(([tab, label, count]) => (
                 <button
-                  key={level}
+                  key={tab}
                   type="button"
-                  className={libraryLevel === level ? 'active' : ''}
-                  aria-pressed={libraryLevel === level}
-                  onClick={() => setLibraryLevel(level)}
+                  role="tab"
+                  id={`library-tab-${tab}`}
+                  aria-selected={libraryTab === tab}
+                  aria-controls="library-tab-panel"
+                  className={libraryTab === tab ? 'active' : ''}
+                  onClick={() => setLibraryTab(tab)}
                 >
-                  {label}
+                  {label}<small>{count}</small>
                 </button>
               ))}
             </div>
-            <label className="library-search">
-              <span className="sr-only">搜索当前时期的诗词</span>
-              <input
-                type="search"
-                value={libraryQuery}
-                placeholder={`搜索${activeSnapshot.dynastyLabel}诗题、作者、年代或地点`}
-                onChange={(event) => setLibraryQuery(event.target.value)}
-                autoFocus
-              />
-              <b>{visibleLibraryPoems.length}/{dynastyPoems.length}</b>
-            </label>
-            <div className="library-poems" role="list" aria-label={`${activeSnapshot.dynastyLabel}作品`}>
-              {visibleLibraryPoems.map((poem, index) => (
-                <button
-                  key={poem.id}
-                  type="button"
-                  role="listitem"
-                  className={poem.id === selectedPoem.id ? 'active' : ''}
-                  aria-current={poem.id === selectedPoem.id ? 'true' : undefined}
-                  data-library-poem={poem.id}
-                  onClick={() => chooseLibraryPoem(poem)}
-                >
-                  <span>{String(index + 1).padStart(2, '0')}</span>
-                  <strong>{poem.title}</strong>
-                  <small>
-                    {poem.curriculumLevels && (
-                      <em>
-                        {poem.curriculumLevels
-                          .map((level) => level === 'primary' ? '小学' : '初中')
-                          .join('·')}
-                      </em>
-                    )}
-                    <span>{poem.author} · {poem.yearLabel} · {poem.placeName}</span>
-                  </small>
-                </button>
-              ))}
-              {visibleLibraryPoems.length === 0 && (
-                <p className="library-empty">没有匹配的作品，换一个关键词试试。</p>
+            <div
+              id="library-tab-panel"
+              className="library-tab-panel"
+              role="tabpanel"
+              aria-labelledby={`library-tab-${libraryTab}`}
+            >
+              {libraryTab === 'poems' && (
+                <div className="curriculum-filter" role="group" aria-label="教材范围">
+                  {([
+                    ['all', '全部'],
+                    ['primary', '小学'],
+                    ['middle', '初中'],
+                  ] as const).map(([level, label]) => (
+                    <button
+                      key={level}
+                      type="button"
+                      className={libraryLevel === level ? 'active' : ''}
+                      aria-pressed={libraryLevel === level}
+                      onClick={() => setLibraryLevel(level)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <label className="library-search">
+                <span className="sr-only">
+                  {libraryTab === 'poems' ? '搜索当前时期的诗词' : '搜索当前时期的诗人'}
+                </span>
+                <input
+                  type="search"
+                  value={libraryTab === 'poems' ? libraryQuery : poetQuery}
+                  placeholder={libraryTab === 'poems'
+                    ? `搜索${activeSnapshot.dynastyLabel}诗题、作者、年代或地点`
+                    : '搜索诗人、字号、籍贯或行经之地'}
+                  onChange={(event) => (libraryTab === 'poems' ? setLibraryQuery : setPoetQuery)(event.target.value)}
+                  autoFocus
+                />
+                <b>
+                  {libraryTab === 'poems'
+                    ? `${visibleLibraryPoems.length}/${dynastyPoems.length}`
+                    : `${visibleLibraryPoets.length}/${dynastyPoets.length}`}
+                </b>
+              </label>
+              {libraryTab === 'poems' ? (
+                <div className="library-poems" role="list" aria-label={`${activeSnapshot.dynastyLabel}作品`}>
+                  {visibleLibraryPoems.map((poem, index) => (
+                    <button
+                      key={poem.id}
+                      type="button"
+                      role="listitem"
+                      className={poem.id === selectedPoem.id ? 'active' : ''}
+                      aria-current={poem.id === selectedPoem.id ? 'true' : undefined}
+                      data-library-poem={poem.id}
+                      onClick={() => chooseLibraryPoem(poem)}
+                    >
+                      <span>{String(index + 1).padStart(2, '0')}</span>
+                      <strong>{poem.title}</strong>
+                      <small>
+                        {poem.curriculumLevels && (
+                          <em>
+                            {poem.curriculumLevels
+                              .map((level) => level === 'primary' ? '小学' : '初中')
+                              .join('·')}
+                          </em>
+                        )}
+                        <span>{poem.author} · {poem.yearLabel} · {poem.placeName}</span>
+                      </small>
+                    </button>
+                  ))}
+                  {visibleLibraryPoems.length === 0 && (
+                    <p className="library-empty">没有匹配的作品，换一个关键词试试。</p>
+                  )}
+                </div>
+              ) : (
+                <PoetRegister
+                  poets={visibleLibraryPoets}
+                  corpus={poems}
+                  selectedAuthor={selectedPoem.author}
+                  unprofiledAuthors={poetQueryKey ? 0 : dynastyAuthors.length - dynastyPoets.length}
+                  onChoosePoet={choosePoetFromLibrary}
+                />
               )}
             </div>
-            <section className="library-evidence" aria-label="当前作品考订说明">
-              <div className="date-evidence">
-                <span>{datePrecisionLabels[selectedPoem.datePrecision]}</span>
-                <b>{selectedPoem.yearLabel} · {selectedPoem.eraLabel}</b>
-                <p>{selectedPoem.dateEvidence}</p>
-              </div>
-              <div className="place-evidence">
-                <span style={{ '--poem-accent': selectedPoem.accent } as CSSProperties}>
-                  {relationLabels[selectedPoem.relation]}
-                </span>
-                <b>{confidenceLabels[selectedPoem.confidence]}</b>
-                <p>{selectedPoem.evidence}</p>
-              </div>
-              <a href={selectedPoem.sourceUrl} target="_blank" rel="noreferrer">
-                文本来源：{selectedPoem.sourceLabel}
-              </a>
-            </section>
+            {libraryTab === 'poems' && (
+              <section className="library-evidence" aria-label="当前作品考订说明">
+                <div className="date-evidence">
+                  <span>{datePrecisionLabels[selectedPoem.datePrecision]}</span>
+                  <b>{selectedPoem.yearLabel} · {selectedPoem.eraLabel}</b>
+                  <p>{selectedPoem.dateEvidence}</p>
+                </div>
+                <div className="place-evidence">
+                  <span style={{ '--poem-accent': selectedPoem.accent } as CSSProperties}>
+                    {relationLabels[selectedPoem.relation]}
+                  </span>
+                  <b>{confidenceLabels[selectedPoem.confidence]}</b>
+                  <p>{selectedPoem.evidence}</p>
+                </div>
+                <a href={selectedPoem.sourceUrl} target="_blank" rel="noreferrer">
+                  文本来源：{selectedPoem.sourceLabel}
+                </a>
+              </section>
+            )}
           </aside>
         </>
       )}

@@ -2,7 +2,7 @@ import { poems } from '../src/data/poems'
 import { schoolPoems, schoolPoemTextKey } from '../src/data/schoolPoems'
 import { schoolPoemSeeds } from '../src/data/schoolPoems.generated'
 import { schoolPoemDateCorrections } from '../src/data/schoolPoemDates'
-import { elevateNearbyPoemPlaces } from '../src/lib/poemPlaces'
+import { poets as poetProfiles } from '../src/data/poets'
 
 const expectedCurriculumPoems = 194
 const publishedByText = new Map(
@@ -35,6 +35,8 @@ if (Object.keys(schoolPoemDateCorrections).length !== expectedCurriculumPoems) {
 if (genericDates.length > 0) {
   throw new Error(`Generic dynasty-only poem dates: ${genericDates.map((poem) => poem.title).join('、')}`)
 }
+
+const profiledAuthors = new Set(poetProfiles.map((poet) => poet.name))
 
 const periodCounts = Object.fromEntries(
   [...new Set(poems.map((poem) => poem.dynasty))]
@@ -75,5 +77,7 @@ console.log(JSON.stringify({
       )]
     }),
   ),
-  maximumLiftTier: Math.max(...elevateNearbyPoemPlaces(poems).map((place) => place.liftTier)),
+  poetProfiles: poetProfiles.length,
+  poemsWithPoetProfile: poems.filter((poem) => profiledAuthors.has(poem.author)).length,
+  poetStations: poetProfiles.reduce((total, poet) => total + poet.stations.length, 0),
 }, null, 2))

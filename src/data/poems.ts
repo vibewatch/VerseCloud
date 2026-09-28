@@ -1,5 +1,6 @@
 import type { Poem } from '../types'
 import { schoolPoems, schoolPoemTextKey } from './schoolPoems'
+import { expandedPoems } from './expandedPoems'
 
 const sourceUrl = 'https://github.com/chinese-poetry/chinese-poetry'
 
@@ -402,7 +403,7 @@ const curatedPoems: UndatedPoem[] = [
       '白发渔樵江渚上，惯看秋月春风。一壶浊酒喜相逢。',
       '古今多少事，都付笑谈中。',
     ],
-    longitude: 98.49, latitude: 25.12, placeId: 'yongchang-yangshen', placeName: '永昌卫 · 杨慎谪所',
+    longitude: 99.16, latitude: 25.12, placeId: 'yongchang-yangshen', placeName: '永昌卫 · 杨慎谪所',
     relation: 'associated', confidence: 'low',
     evidence: '《临江仙》收入杨慎谪滇时期相关著述，具体落笔处不可考；以其长期居留的永昌卫作人物关联，不把词中长江坐标移到云南。',
     sourceLabel: '《廿一史弹词》· 开放古籍校订', sourceUrl,
@@ -452,9 +453,29 @@ const curatedPoems: UndatedPoem[] = [
 const schoolPoemByText = new Map(
   schoolPoems.map((poem) => [schoolPoemTextKey(poem), poem]),
 )
+
+/**
+ * A curated text can be a shorter edition of a school text (for example the
+ * school edition keeps a preface). The school edition wins, but the poem
+ * keeps its curated position and id so links stay stable.
+ */
+function schoolEditionOf(poem: UndatedPoem | Poem) {
+  const key = schoolPoemTextKey(poem)
+  const exact = schoolPoemByText.get(key)
+  if (exact) return exact
+  return schoolPoems.find((schoolPoem) =>
+    schoolPoem.author === poem.author && schoolPoemTextKey(schoolPoem).includes(key))
+}
+
 const publishedTextKeys = new Set<string>()
 
-export const poems: Poem[] = [...curatedPoems, ...schoolPoems]
+export const poems: Poem[] = [...curatedPoems, ...schoolPoems, ...expandedPoems]
+  .map((poem) => {
+    const schoolPoem = schoolEditionOf(poem)
+    return schoolPoem && schoolPoem !== poem
+      ? { ...poem, title: schoolPoem.title, lines: schoolPoem.lines }
+      : poem
+  })
   .filter((poem) => {
     const key = schoolPoemTextKey(poem)
     if (publishedTextKeys.has(key)) return false
@@ -463,7 +484,8 @@ export const poems: Poem[] = [...curatedPoems, ...schoolPoems]
   })
   .map((poem) => {
     const schoolPoem = schoolPoemByText.get(schoolPoemTextKey(poem))
-    const poemChronology = schoolPoem ?? curatedPoemChronologies[poem.id]
+    const ownChronology = 'datePrecision' in poem ? poem : undefined
+    const poemChronology = schoolPoem ?? curatedPoemChronologies[poem.id] ?? ownChronology
     if (!poemChronology) {
       throw new Error(`Missing individual chronology for published poem ${poem.id} (${poem.title})`)
     }
