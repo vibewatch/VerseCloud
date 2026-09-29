@@ -18,7 +18,7 @@ import { projectPoint } from '../lib/geo'
 import { distanceKm, poemsByAuthor, poetTrail } from '../lib/poetGeography'
 import { groupPoemsByPlace, type PoemPlaceGroup } from '../lib/poemPlaces'
 import { emptyPoemRoute, poemRoute } from '../lib/poemRoute'
-import type { GeoPlace, Poem, PoetProfile, PoetStation, ScenePoint } from '../types'
+import type { DynastyId, GeoPlace, Poem, PoetProfile, PoetStation, ScenePoint } from '../types'
 
 interface VerseSceneProps {
   poems: Poem[]
@@ -627,20 +627,12 @@ function applyTrailDimming(map: MapLibreMap, active: boolean) {
   })
 }
 
-async function addWebglLabelLayers(
+/** Name images for one period's places and regions; drawn once, then reused. */
+function addPeriodLabelImages(
   map: MapLibreMap,
-  container: HTMLElement,
   groups: PoemPlaceGroup[],
   context: HistoricalMapContext,
-  isTrailActive: () => boolean,
 ) {
-  await document.fonts.ready
-  try {
-    if (!map.getSource('poems')) return
-  } catch {
-    return
-  }
-
   context.labels.forEach((label, index) => {
     const id = `historical-label-${context.dynasty}-${index}`
     if (map.hasImage(id)) return
@@ -653,6 +645,49 @@ async function addWebglLabelLayers(
     const rendered = createPoemLabelImage(group.placeName)
     if (rendered) map.addImage(id, rendered.image, { pixelRatio: rendered.pixelRatio })
   })
+}
+
+function describePeriod(
+  container: HTMLElement,
+  dynasty: DynastyId,
+  context: HistoricalMapContext,
+  groups: PoemPlaceGroup[],
+) {
+  container.setAttribute('data-dynasty', dynasty)
+  container.setAttribute('data-history-layer', `${dynasty}-administrative-context`)
+  container.setAttribute('data-administrative-system', context.systemLabel)
+  container.setAttribute('data-administrative-reference', context.referenceLabel)
+  container.setAttribute(
+    'data-administrative-region-count',
+    String(context.labels.filter((label) => label.kind === 'region').length),
+  )
+  container.setAttribute(
+    'data-poem-place-groups',
+    JSON.stringify(groups.map((group) => ({
+      key: group.key,
+      count: group.poems.length,
+      markerHeight: poemMarkerHeight,
+      poemIds: group.poems.map((poem) => poem.id),
+    }))),
+  )
+}
+
+async function addWebglLabelLayers(
+  map: MapLibreMap,
+  container: HTMLElement,
+  currentPeriod: () => { groups: PoemPlaceGroup[]; context: HistoricalMapContext },
+  isTrailActive: () => boolean,
+) {
+  await document.fonts.ready
+  try {
+    if (!map.getSource('poems')) return
+  } catch {
+    return
+  }
+
+  // The reader may have changed period while the fonts loaded.
+  const { groups, context } = currentPeriod()
+  addPeriodLabelImages(map, groups, context)
   const tones: PoemMarkerTone[] = ['idle', 'selected', 'trail']
   tones.forEach((tone) => {
     const id = `poem-marker-${tone}`
@@ -1251,6 +1286,9 @@ export function VerseScene({
   const trailPoetRef = useRef(trailPoet)
   const trailFoldedRef = useRef(trailFolded)
   const placeGroups = useMemo(() => groupPoemsByPlace(poems), [poems])
+  // One map lives for the whole visit; a new period only swaps its data.
+  const poemsRef = useRef(poems)
+  const placeGroupsRef = useRef(placeGroups)
 
   useEffect(() => {
     onSelectRef.current = onSelectPoem
@@ -1276,7 +1314,6 @@ export function VerseScene({
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return
     const compact = window.matchMedia('(max-width: 680px)').matches
-    const groups = placeGroups
     const sceneFocus = (): PoemSceneFocus => ({
       selectedPoemId: selectedPoemRef.current.id,
       trailAuthor: trailPoetRef.current?.name,
@@ -1344,7 +1381,7 @@ export function VerseScene({
       if (markerElement) scaleVerticalVerseMarker(markerElement, map)
     }
     const updatePoemScreenPositions = () => {
-      const positions = Object.fromEntries(poems.map((poem) => {
+      const positions = Object.fromEntries(poemsRef.current.map((poem) => {
         const point = map.project([poem.longitude, poem.latitude])
         return [poem.id, { x: Math.round(point.x), y: Math.round(point.y) }]
       }))
@@ -1385,55 +1422,36 @@ export function VerseScene({
     })
 
     map.once('style.load', () => {
-      const historicalContext = historicalMapContexts[selectedPoemRef.current.dynasty]
+      const dynasty = selectedPoemRef.current.dynasty
+      const historicalContext = historicalMapContexts[dynasty]
+      const groups = placeGroupsRef.current
       addHistoricalLayers(map, groups, sceneFocus(), historicalContext)
       trailMarkersRef.current = renderPoetTrail(
         map,
         trailPoetRef.current,
-        poems,
+        poemsRef.current,
         groups,
         selectedPoemRef.current.id,
         trailMarkersRef.current,
       )
       containerRef.current?.setAttribute('data-map-scope', 'classical-china')
-      containerRef.current?.setAttribute('data-dynasty', selectedPoemRef.current.dynasty)
-      containerRef.current?.setAttribute(
-        'data-history-layer',
-        `${selectedPoemRef.current.dynasty}-administrative-context`,
-      )
       containerRef.current?.setAttribute('data-boundary-rendered', 'false')
       containerRef.current?.setAttribute('data-administrative-division-rendered', 'true')
-      containerRef.current?.setAttribute(
-        'data-administrative-system',
-        historicalContext.systemLabel,
-      )
-      containerRef.current?.setAttribute(
-        'data-administrative-reference',
-        historicalContext.referenceLabel,
-      )
-      containerRef.current?.setAttribute(
-        'data-administrative-region-count',
-        String(historicalContext.labels.filter((label) => label.kind === 'region').length),
-      )
       containerRef.current?.setAttribute('data-poem-point-style', 'abstract-slip')
       containerRef.current?.setAttribute('data-poem-route-renderer', 'webgl-gradient')
       containerRef.current?.setAttribute('data-poem-route-state', 'idle')
-      containerRef.current?.setAttribute(
-        'data-poem-place-groups',
-        JSON.stringify(groups.map((group) => ({
-          key: group.key,
-          count: group.poems.length,
-          markerHeight: poemMarkerHeight,
-          poemIds: group.poems.map((poem) => poem.id),
-        }))),
-      )
+      if (containerRef.current) {
+        describePeriod(containerRef.current, dynasty, historicalContext, groups)
+      }
       containerRef.current?.setAttribute('data-poem-hit-ready', 'true')
       if (containerRef.current) {
         void addWebglLabelLayers(
           map,
           containerRef.current,
-          groups,
-          historicalContext,
+          () => ({
+            groups: placeGroupsRef.current,
+            context: historicalMapContexts[selectedPoemRef.current.dynasty],
+          }),
           () => Boolean(trailPoetRef.current),
         )
       }
@@ -1474,7 +1492,7 @@ export function VerseScene({
         ? map.queryRenderedFeatures({ layers: markerLayers })
           .map((feature) => String(feature.properties?.key ?? ''))
         : [])
-      visibleGroups = groups.filter((group) => keys.has(group.key))
+      visibleGroups = placeGroupsRef.current.filter((group) => keys.has(group.key))
       const clusterLayers = presentLayers(['poem-clusters'])
       const clusters = clusterLayers.length
         ? map.queryRenderedFeatures({ layers: clusterLayers }).map((feature) => {
@@ -1560,7 +1578,7 @@ export function VerseScene({
           return []
         }
       }))
-      openPicker(poems.filter((poem) => memberIds.has(poem.id)), coordinates)
+      openPicker(poemsRef.current.filter((poem) => memberIds.has(poem.id)), coordinates)
     }
 
     map.on('click', (event) => {
@@ -1588,7 +1606,7 @@ export function VerseScene({
       const label = labelLayers.length
         ? map.queryRenderedFeatures(event.point, { layers: labelLayers })[0]
         : undefined
-      const labelGroup = groups.find((group) => group.key === label?.properties?.key)
+      const labelGroup = placeGroupsRef.current.find((group) => group.key === label?.properties?.key)
       if (!labelGroup) {
         closePicker()
         return
@@ -1663,6 +1681,32 @@ export function VerseScene({
       map.remove()
       mapRef.current = null
     }
+  }, [])
+
+  useEffect(() => {
+    if (poemsRef.current === poems) return
+    poemsRef.current = poems
+    placeGroupsRef.current = placeGroups
+    const map = mapRef.current
+    const container = containerRef.current
+    // Before the style loads, `style.load` reads the refs above instead.
+    if (!map || !container || !map.getSource('poems')) return
+    const dynasty = poems[0]?.dynasty ?? selectedPoemRef.current.dynasty
+    const context = historicalMapContexts[dynasty]
+    // Label layers exist only once fonts are ready; until then they will draw
+    // the current period's names themselves.
+    const labelsReady = Boolean(map.getSource('historical-labels'))
+    if (labelsReady) addPeriodLabelImages(map, placeGroups, context)
+    ;(map.getSource('historical-regions') as GeoJSONSource | undefined)
+      ?.setData(historicalDivisionCollection(context))
+    if (labelsReady) {
+      ;(map.getSource('historical-labels') as GeoJSONSource).setData(historicalLabelCollection(context))
+    }
+    refreshPoemSources(map, placeGroups, {
+      selectedPoemId: selectedPoemRef.current.id,
+      trailAuthor: trailPoetRef.current?.name,
+    })
+    describePeriod(container, dynasty, context, placeGroups)
   }, [placeGroups, poems])
 
   useEffect(() => {
@@ -1703,7 +1747,7 @@ export function VerseScene({
     }
     scaleVerticalVerseMarker(selectedMarkerRef.current.getElement(), map)
 
-    refreshPoemSources(map, placeGroups, {
+    refreshPoemSources(map, placeGroupsRef.current, {
       selectedPoemId: selectedPoem.id,
       trailAuthor: trailPoetRef.current?.name,
     })
@@ -1723,7 +1767,14 @@ export function VerseScene({
         window.clearTimeout(routeSettleTimerRef.current)
         routeSettleTimerRef.current = 0
       }
-
+    }
+    if (routeSource && previousPoem.dynasty !== selectedPoem.dynasty) {
+      // The ink line reads as a journey; works centuries apart share no road.
+      routeSource.setData(emptyPoemRoute())
+      containerRef.current?.removeAttribute('data-poem-route-from')
+      containerRef.current?.removeAttribute('data-poem-route-to')
+      containerRef.current?.setAttribute('data-poem-route-state', 'idle')
+    } else if (routeSource && previousPoem.id !== selectedPoem.id) {
       const route = poemRoute(previousPoem, selectedPoem)
       routeSource.setData(route)
       containerRef.current?.setAttribute('data-poem-route-from', previousPoem.id)
@@ -1784,7 +1835,7 @@ export function VerseScene({
     // While a folded trail is on screen the whole life stays framed.
     if (trailPoetRef.current && trailFoldedRef.current) return
     focusSelectedPoem(map, selectedPoem)
-  }, [placeGroups, poems, selectedPoem])
+  }, [selectedPoem])
 
   useEffect(() => {
     const map = mapRef.current
